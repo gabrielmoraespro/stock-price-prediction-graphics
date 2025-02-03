@@ -41,6 +41,18 @@ The Stock Price Prediction App is a Streamlit-based web application that provide
    ```sh
    pip install -r requirements.txt
    ```
+## Virtual env
+
+1. Install Virtualenv:
+   ```sh
+   pip install virtualenv
+   virtualenv version
+   ```
+   1. Create Virtualenv:
+   ```sh
+   virtualenv myenv
+   source myenv/bin/activate
+   ```
 
 ## Usage
 
