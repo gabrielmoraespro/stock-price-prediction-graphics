@@ -1,0 +1,375 @@
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import datetime
+import plotly.express as px
+import plotly.graph_objects as go
+from ta.volatility import BollingerBands
+from ta.trend import MACD, EMAIndicator, SMAIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.model_selection import train_test_split, TimeSeriesSplit
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import numpy as np
+
+# Configuração do layout com tema personalizado
+st.set_page_config(page_title="Advanced Stock Price Predictions", layout="wide")
+
+# Configuração de tema e estilo
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f5f5;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: white;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title('📈 Advanced Stock Price Predictions')
+st.sidebar.info("Created and designed by [Vikas Sharma](https://www.linkedin.com/in/vikas-sharma005/)")
+
+# Melhorar o cache com TTL (Time To Live)
+@st.cache_data(ttl=3600)  # Cache válido por 1 hora
+def download_data(symbol, start_date, end_date):
+    """Baixa e processa dados do Yahoo Finance com validação melhorada."""
+    try:
+        df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+        if df.empty:
+            st.error("⚠️ No data found for the given stock symbol and date range.")
+            return None
+        
+        df = df.copy()  # Criar cópia para evitar SettingWithCopyWarning
+        df.reset_index(inplace=True)
+        
+        # Validação de dados
+        required_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in df.columns for col in required_columns):
+            st.error("⚠️ Missing required columns in the downloaded data.")
+            return None
+            
+        # Limpeza de dados
+        df = df.dropna()  # Remover linhas com valores ausentes
+        
+        # Adicionar colunas de análise técnica básica
+        df['Daily_Return'] = df['Close'].pct_change()
+        df['Volatility'] = df['Daily_Return'].rolling(window=21).std() * np.sqrt(252)
+        
+        return df
+    except Exception as e:
+        st.error(f"❌ Error downloading data: {str(e)}")
+        return None
+
+def plot_chart(df, title, y_column, color="blue", add_volume=False):
+    """Gera gráficos interativos aprimorados usando Plotly."""
+    try:
+        fig = go.Figure()
+        
+        # Adicionar linha principal
+        fig.add_trace(go.Scatter(
+            x=df['Date'],
+            y=df[y_column],
+            name=y_column,
+            line=dict(color=color)
+        ))
+        
+        # Adicionar volume se solicitado
+        if add_volume:
+            fig.add_trace(go.Bar(
+                x=df['Date'],
+                y=df['Volume'],
+                name='Volume',
+                yaxis='y2',
+                opacity=0.3
+            ))
+            
+            fig.update_layout(
+                yaxis2=dict(
+                    title="Volume",
+                    overlaying="y",
+                    side="right"
+                )
+            )
+        
+        fig.update_layout(
+            title=title,
+            xaxis_title="Date",
+            yaxis_title=y_column,
+            hovermode='x unified',
+            template='plotly_white'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Error plotting chart: {str(e)}")
+
+def tech_indicators(df):
+    """Exibe indicadores técnicos aprimorados."""
+    st.header('📊 Technical Indicators')
+    
+    # Adicionar mais opções de indicadores
+    option = st.radio('Choose a Technical Indicator:', 
+                     ['Close', 'Bollinger Bands', 'MACD', 'RSI', 'SMA', 'EMA', 
+                      'Stochastic Oscillator', 'Volume Analysis'])
+
+    try:
+        close_prices = df['Close']
+        
+        # Calcular indicadores com diferentes períodos
+        periods = st.slider('Select period for indicators', 5, 50, 14)
+        
+        # Cálculos aprimorados dos indicadores
+        bb_indicator = BollingerBands(close_prices, window=periods)
+        df['bb_high'] = bb_indicator.bollinger_hband()
+        df['bb_low'] = bb_indicator.bollinger_lband()
+        df['bb_mid'] = bb_indicator.bollinger_mavg()
+        
+        macd = MACD(close_prices)
+        df['macd'] = macd.macd()
+        df['macd_signal'] = macd.macd_signal()
+        
+        df['rsi'] = RSIIndicator(close_prices, window=periods).rsi()
+        df['sma'] = SMAIndicator(close_prices, window=periods).sma_indicator()
+        df['ema'] = EMAIndicator(close_prices, window=periods).ema_indicator()
+        
+        # Novo indicador: Stochastic Oscillator
+        stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=periods)
+        df['stoch_k'] = stoch.stoch()
+        df['stoch_d'] = stoch.stoch_signal()
+
+        # Plotagem específica para cada indicador
+        if option == 'Close':
+            plot_chart(df, 'Close Price with Volume', 'Close', add_volume=True)
+        elif option == 'Bollinger Bands':
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name='Close'))
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['bb_high'], name='Upper Band', line=dict(dash='dash')))
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['bb_low'], name='Lower Band', line=dict(dash='dash')))
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['bb_mid'], name='Middle Band', line=dict(dash='dot')))
+            st.plotly_chart(fig, use_container_width=True)
+        elif option == 'MACD':
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['macd'], name='MACD'))
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['macd_signal'], name='Signal'))
+            st.plotly_chart(fig, use_container_width=True)
+        elif option == 'RSI':
+            plot_chart(df, 'RSI', 'rsi', color="purple")
+            # Adicionar linhas de sobrecompra/sobrevenda
+            plt_rsi = go.Figure()
+            plt_rsi.add_trace(go.Scatter(x=df['Date'], y=df['rsi'], name='RSI'))
+            plt_rsi.add_hline(y=70, line_dash="dash", line_color="red")
+            plt_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+            st.plotly_chart(plt_rsi, use_container_width=True)
+        elif option == 'Volume Analysis':
+            # Análise de volume aprimorada
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=df['Date'], y=df['Volume'], name='Volume'))
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['Volume'].rolling(window=20).mean(), 
+                                   name='Volume MA(20)', line=dict(color='red')))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            plot_chart(df, f'{option}', option.lower(), color="green")
+
+    except Exception as e:
+        st.error(f"Error in technical analysis: {str(e)}")
+
+def predict(df):
+    """Previsão de preços aprimorada com mais recursos."""
+    st.header('🔮 Advanced Price Prediction')
+    
+    # Mais opções de modelos e configurações
+    model_choice = st.selectbox(
+        'Choose a model:',
+        ['Linear Regression', 'Random Forest', 'Extra Trees', 'KNN', 'XGBoost']
+    )
+    
+    # Configurações avançadas
+    with st.expander("Advanced Settings"):
+        test_size = st.slider('Test Set Size (%)', 10, 40, 20)
+        n_splits = st.slider('Number of Cross-validation Splits', 2, 10, 5)
+        feature_scaling = st.selectbox('Feature Scaling', ['Standard', 'Robust', 'None'])
+    
+    days_forecast = st.slider('Forecast Horizon (days)', 1, 60, 5)
+    
+    if st.button('Predict'):
+        with st.spinner('Training models and making predictions...'):
+            train_and_predict(
+                model_choice, df, days_forecast, 
+                test_size/100, n_splits, feature_scaling
+            )
+
+def train_and_predict(model_choice, df, days, test_size, n_splits, scaling):
+    """Treino e previsão aprimorados com validação cruzada."""
+    try:
+        # Preparação dos dados
+        df = prepare_features(df)
+        
+        X = df.drop(['Target'], axis=1)
+        y = df['Target']
+        
+        # Escolha do scaler
+        scaler = get_scaler(scaling)
+        if scaler:
+            X = scaler.fit_transform(X)
+        
+        # Divisão temporal dos dados
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        
+        # Seleção e treinamento do modelo
+        model = get_model(model_choice)
+        
+        # Cross-validation scores
+        cv_scores = []
+        for train_idx, test_idx in tscv.split(X):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            
+            model.fit(X_train, y_train)
+            pred = model.predict(X_test)
+            cv_scores.append(r2_score(y_test, pred))
+        
+        # Métricas finais
+        st.subheader("📊 Model Performance")
+        st.write(f"**Average R² Score (CV):** {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}")
+        
+        # Previsões futuras
+        last_data = X[-days:]
+        future_pred = model.predict(last_data)
+        
+        # Visualização das previsões
+        plot_predictions(df, future_pred, days)
+        
+    except Exception as e:
+        st.error(f"Error in prediction: {str(e)}")
+
+def prepare_features(df):
+    """Prepara features avançadas para o modelo."""
+    df = df.copy()
+    
+    # Features técnicas
+    df['MA5'] = df['Close'].rolling(window=5).mean()
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['RSI'] = RSIIndicator(df['Close']).rsi()
+    df['BB_upper'] = BollingerBands(df['Close']).bollinger_hband()
+    df['BB_lower'] = BollingerBands(df['Close']).bollinger_lband()
+    
+    # Features de momento
+    df['Returns'] = df['Close'].pct_change()
+    df['Volatility'] = df['Returns'].rolling(window=20).std()
+    
+    # Target variable
+    df['Target'] = df['Close'].shift(-1)
+    
+    # Limpar dados
+    df = df.dropna()
+    
+    return df
+
+def get_scaler(scaling_type):
+    """Retorna o scaler apropriado."""
+    if scaling_type == 'Standard':
+        return StandardScaler()
+    elif scaling_type == 'Robust':
+        return RobustScaler()
+    return None
+
+def get_model(model_choice):
+    """Retorna o modelo selecionado com parâmetros otimizados."""
+    models = {
+        'Linear Regression': LinearRegression(),
+        'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+        'Extra Trees': ExtraTreesRegressor(n_estimators=100, random_state=42),
+        'KNN': KNeighborsRegressor(n_neighbors=5),
+        'XGBoost': XGBRegressor(n_estimators=100, random_state=42)
+    }
+    return models[model_choice]
+
+def plot_predictions(df, predictions, days):
+    """Plota as previsões de forma mais informativa."""
+    fig = go.Figure()
+    
+    # Dados históricos
+    fig.add_trace(go.Scatter(
+        x=df.index[-30:],
+        y=df['Close'][-30:],
+        name='Historical',
+        line=dict(color='blue')
+    ))
+    
+    # Previsões
+    future_dates = pd.date_range(
+        start=df.index[-1], 
+        periods=days+1, 
+        closed='right'
+    )
+    
+    fig.add_trace(go.Scatter(
+        x=future_dates,
+        y=predictions,
+        name='Prediction',
+        line=dict(color='red', dash='dash')
+    ))
+    
+    fig.update_layout(
+        title='Price Prediction',
+        xaxis_title='Date',
+        yaxis_title='Price',
+        hovermode='x unified'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def main():
+    """Função principal com interface melhorada."""
+    # Sidebar com mais opções
+    with st.sidebar:
+        st.header("Configuration")
+        option = st.selectbox('Select Analysis Type', 
+                            ['Technical Analysis', 'Price Prediction', 'Data Overview'])
+        
+        stock_symbol = st.text_input('Enter Stock Symbol', 'AAPL').upper()
+        
+        # Seleção de período mais intuitiva
+        period_options = {
+            '1 Month': 30,
+            '3 Months': 90,
+            '6 Months': 180,
+            '1 Year': 365,
+            '2 Years': 730,
+            '5 Years': 1825
+        }
+        selected_period = st.selectbox('Select Period', list(period_options.keys()))
+        duration = period_options[selected_period]
+        
+        today = datetime.date.today()
+        start_date = today - datetime.timedelta(days=duration)
+        end_date = today
+        
+        # Botão de atualização
+        if st.button('Load/Refresh'):
+            df = download_data(stock_symbol, start_date, end_date)
+            if df is not None:
+                st.session_state['df'] = df  # Armazenar o DataFrame no estado da sessão
+
+    # Executar a análise selecionada
+    if 'df' in st.session_state and st.session_state['df'] is not None:
+        df = st.session_state['df']
+
+        if option == 'Technical Analysis':
+            tech_indicators(df)
+        elif option == 'Price Prediction':
+            predict(df)
+        elif option == 'Data Overview':
+            st.subheader("📜 Data Overview")
+            st.write(df.head())
+            st.write(f"Data Range: {df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%Y-%m-%d')}")
+            plot_chart(df, "Stock Price Over Time", "Close", add_volume=True)
+
+if __name__ == "__main__":
+    main()

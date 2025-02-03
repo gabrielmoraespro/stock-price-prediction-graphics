@@ -1,0 +1,307 @@
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import datetime
+import plotly.express as px
+import plotly.graph_objects as go
+from ta.volatility import BollingerBands
+from ta.trend import MACD, EMAIndicator, SMAIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, GradientBoostingRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import numpy as np
+import logging
+import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# Page configuration
+st.set_page_config(
+    page_title="Advanced Stock Price Predictions",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+    <style>
+    .main {
+        padding: 2rem;
+    }
+    .stAlert {
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0.5rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+class StockAnalyzer:
+    """Class to handle stock analysis operations"""
+    
+    def __init__(self):
+        self.models = {
+            'Linear Regression': LinearRegression(),
+            'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+            'Extra Trees': ExtraTreesRegressor(n_estimators=100, random_state=42),
+            'KNN': KNeighborsRegressor(n_neighbors=5),
+            'XGBoost': XGBRegressor(random_state=42),
+            'Gradient Boosting': GradientBoostingRegressor(random_state=42)
+        }
+    
+    @staticmethod
+    @st.cache_data(ttl=3600)  # Cache data for 1 hour
+    def download_data(symbol, start_date, end_date):
+        """Download and preprocess stock data"""
+        try:
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+            if df.empty:
+                raise ValueError("No data found for the given stock symbol and date range.")
+            
+            df.reset_index(inplace=True)
+            
+            # Handle MultiIndex columns if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = ['_'.join(col).strip() for col in df.columns]
+            
+            # Add technical indicators
+            df = StockAnalyzer.add_technical_indicators(df)
+            
+            return df
+            
+        except Exception as e:
+            logging.error(f"Error downloading data: {str(e)}")
+            return None
+
+    @staticmethod
+    def add_technical_indicators(df):
+        """Add technical indicators to the dataframe"""
+        try:
+            close = df['Close']
+            
+            # Basic indicators
+            df['SMA_20'] = SMAIndicator(close, window=20).sma_indicator()
+            df['EMA_20'] = EMAIndicator(close, window=20).ema_indicator()
+            
+            # Bollinger Bands
+            bb = BollingerBands(close)
+            df['BB_upper'] = bb.bollinger_hband()
+            df['BB_lower'] = bb.bollinger_lband()
+            
+            # MACD
+            macd = MACD(close)
+            df['MACD'] = macd.macd()
+            df['MACD_signal'] = macd.macd_signal()
+            
+            # RSI
+            df['RSI'] = RSIIndicator(close).rsi()
+            
+            # Stochastic Oscillator
+            stoch = StochasticOscillator(df['High'], df['Low'], close)
+            df['Stoch_k'] = stoch.stoch()
+            df['Stoch_d'] = stoch.stoch_signal()
+            
+            # Volatility
+            df['Daily_Return'] = close.pct_change()
+            df['Volatility'] = df['Daily_Return'].rolling(window=20).std()
+            
+            return df
+            
+        except Exception as e:
+            logging.error(f"Error adding technical indicators: {str(e)}")
+            return df
+
+    def create_features(self, df):
+        """Create features for machine learning"""
+        df_ml = df.copy()
+        
+        # Add lag features
+        for i in [1, 2, 3, 5, 8, 13, 21]:
+            df_ml[f'Close_lag_{i}'] = df_ml['Close'].shift(i)
+        
+        # Add rolling mean features
+        for window in [7, 14, 30]:
+            df_ml[f'Close_rolling_mean_{window}'] = df_ml['Close'].rolling(window=window).mean()
+        
+        # Add price momentum
+        df_ml['Price_Momentum'] = df_ml['Close'] - df_ml['Close'].shift(5)
+        
+        return df_ml.dropna()
+
+    def train_model(self, df, model_name, target_days):
+        """Train the selected model"""
+        try:
+            # Prepare features
+            df_ml = self.create_features(df)
+            
+            # Create target variable
+            df_ml['Target'] = df_ml['Close'].shift(-target_days)
+            df_ml = df_ml.dropna()
+            
+            # Split features and target
+            X = df_ml.drop(['Target', 'Date'], axis=1)
+            y = df_ml['Target']
+            
+            # Scale features
+            scaler = MinMaxScaler()
+            X_scaled = scaler.fit_transform(X)
+            
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y, test_size=0.2, random_state=42
+            )
+            
+            # Train model
+            model = self.models[model_name]
+            model.fit(X_train, y_train)
+            
+            # Make predictions
+            predictions = model.predict(X_test)
+            
+            # Calculate metrics
+            metrics = {
+                'R2': r2_score(y_test, predictions),
+                'MAE': mean_absolute_error(y_test, predictions),
+                'RMSE': np.sqrt(mean_squared_error(y_test, predictions)),
+                'Cross_Val_Score': np.mean(cross_val_score(model, X_scaled, y, cv=5))
+            }
+            
+            return model, scaler, metrics, X.columns
+            
+        except Exception as e:
+            logging.error(f"Error in model training: {str(e)}")
+            return None, None, None, None
+
+def main():
+    """Main application function"""
+    st.title('📈 Advanced Stock Price Predictions')
+    
+    analyzer = StockAnalyzer()
+    
+    # Sidebar configuration
+    with st.sidebar:
+        st.header("Configuration")
+        stock_symbol = st.text_input('Stock Symbol', 'AAPL').upper()
+        
+        today = datetime.date.today()
+        duration = st.slider('Duration (days)', 365, 1825, 365)
+        start_date = st.date_input('Start Date', today - datetime.timedelta(days=duration))
+        end_date = st.date_input('End Date', today)
+        
+        analysis_type = st.radio(
+            "Analysis Type",
+            ["Technical Analysis", "Price Prediction", "Data Overview"]
+        )
+    
+    if st.sidebar.button('Analyze'):
+        if start_date >= end_date:
+            st.error("Start date must be before end date!")
+            return
+        
+        with st.spinner('Loading data...'):
+            df = analyzer.download_data(stock_symbol, start_date, end_date)
+            
+        if df is not None:
+            if analysis_type == "Technical Analysis":
+                display_technical_analysis(df)
+            elif analysis_type == "Price Prediction":
+                display_price_prediction(df, analyzer)
+            else:
+                display_data_overview(df)
+        else:
+            st.error("Failed to load data. Please check the stock symbol and try again.")
+
+def display_technical_analysis(df):
+    """Display technical analysis charts"""
+    st.header("Technical Analysis")
+    
+    # Price chart with moving averages
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name='Close Price'))
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['SMA_20'], name='SMA 20'))
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['EMA_20'], name='EMA 20'))
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Technical indicators
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # RSI
+        fig_rsi = go.Figure()
+        fig_rsi.add_trace(go.Scatter(x=df['Date'], y=df['RSI'], name='RSI'))
+        fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
+        fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+        st.plotly_chart(fig_rsi, use_container_width=True)
+    
+    with col2:
+        # MACD
+        fig_macd = go.Figure()
+        fig_macd.add_trace(go.Scatter(x=df['Date'], y=df['MACD'], name='MACD'))
+        fig_macd.add_trace(go.Scatter(x=df['Date'], y=df['MACD_signal'], name='Signal'))
+        st.plotly_chart(fig_macd, use_container_width=True)
+
+def display_price_prediction(df, analyzer):
+    """Display price prediction analysis"""
+    st.header("Price Prediction")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        model_name = st.selectbox(
+            'Select Model',
+            list(analyzer.models.keys())
+        )
+    
+    with col2:
+        prediction_days = st.slider('Prediction Days', 1, 30, 5)
+    
+    if st.button('Train Model'):
+        with st.spinner('Training model...'):
+            model, scaler, metrics, features = analyzer.train_model(
+                df, model_name, prediction_days
+            )
+        
+        if model is not None:
+            st.subheader("Model Performance Metrics")
+            metrics_df = pd.DataFrame([metrics])
+            st.dataframe(metrics_df)
+            
+            st.subheader("Feature Importance")
+            if hasattr(model, 'feature_importances_'):
+                importance_df = pd.DataFrame({
+                    'Feature': features,
+                    'Importance': model.feature_importances_
+                }).sort_values('Importance', ascending=False)
+                st.bar_chart(importance_df.set_index('Feature'))
+
+def display_data_overview(df):
+    """Display data overview"""
+    st.header("Data Overview")
+    
+    st.subheader("Recent Data")
+    st.dataframe(df.tail())
+    
+    st.subheader("Statistical Summary")
+    st.dataframe(df.describe())
+    
+    st.subheader("Missing Values")
+    missing_data = df.isnull().sum()
+    if missing_data.any():
+        st.write(missing_data[missing_data > 0])
+    else:
+        st.write("No missing values found!")
+
+if __name__ == "__main__":
+    main()
